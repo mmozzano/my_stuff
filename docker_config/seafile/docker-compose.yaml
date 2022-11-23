@@ -1,0 +1,105 @@
+version: '2.0'
+
+secrets:
+  seafile_mysql_root_pass:
+    file: /home/${MYID}/.docker/secrets/seafile_mysql_root_pass
+  seafile_admin_pass:
+    file: /home/${MYID}/.docker/secrets/seafile_admin_pass
+  seafile_admin_email:
+    file: /home/${MYID}/.docker/secrets/seafile_admin_email
+
+
+services:
+  db:
+    image: index.docker.io/mariadb:latest
+    container_name: ${SERVICE}-db
+    restart: always
+    secrets:
+      - seafile_mysql_root_pass
+    environment:
+      - FILE__MYSQL_ROOT_PASSWORD=/run/secrets/seafile_mysql_root_pass
+      - MYSQL_LOG_CONSOLE=true
+      - TZ=Europe/London
+    volumes:
+      - /etc/seafile/db:/var/lib/mysql
+    networks:
+      - internal
+
+  memcached:
+    image: memcached:1.5.6
+    restart: always
+    container_name: seafile-memcached
+    entrypoint: memcached -m 256
+    networks:
+      - traefik_default
+          
+  seafile:
+    image: index.docker.io/seafileltd/seafile-mc:latest
+    container_name: ${SERVICE}-app
+    restart: always
+    volumes:
+      - /etc/seafile/shared:/shared
+    secrets:
+      - seafile_mysql_root_pass
+      - seafile_admin_pass
+      - seafile_admin_email
+    environment:
+      - DB_HOST=db
+      - FILE__DB_ROOT_PASSWD=/run/secrets/seafile_mysql_root_pass
+      - TIME_ZONE=Europe/London
+      - SEAFILE_ADMIN_EMAIL=/run/secrets/seafile_admin_email
+      - FILE__SEAFILE_ADMIN_PASSWORD=/run/secrets/seafile_admin_pass
+      - SEAFILE_SERVER_HOSTNAME=${SERVICE}.${DOMAIN}
+      - SEAFILE_SERVICE_URL=https://${SERVICE}.${DOMAIN}
+      - SEAFILE_FILE_SERVER_ROOT=https://${SERVICE}.${DOMAIN}/seafhttp
+    labels:
+      - traefik.enable=true
+      # HTTP Router Seafile
+      - traefik.http.routers.${SERVICE}.rule=Host(`${SERVICE}.${DOMAIN}`)
+      - traefik.http.routers.${SERVICE}.entrypoints=websecure
+      - traefik.http.routers.${SERVICE}.tls=true
+      - traefik.http.routers.${SERVICE}-http.middlewares=sec-headers
+      - traefik.http.routers.${SERVICE}.service=${SERVICE}
+      - traefik.http.services.${SERVICE}.loadbalancer.server.port=80
+      # HTTP Router Seafdav
+      - traefik.http.routers.${SERVICE}-dav.rule=Host(`${SERVICE}.${DOMAIN}`) && PathPrefix(`/seafdav`)
+      - traefik.http.routers.${SERVICE}-dav.entrypoints=websecure
+      - traefik.http.routers.${SERVICE}-dav.tls=true
+      - traefik.http.routers.${SERVICE}-dav.service=${SERVICE}-dav
+      - traefik.http.services.${SERVICE}-dav.loadbalancer.server.port=8080
+      # HTTP Router Seafhttp
+      - traefik.http.routers.${SERVICE}-http.rule=Host(`${SERVICE}.${DOMAIN}`) && PathPrefix(`/seafhttp`)
+      - traefik.http.routers.${SERVICE}-http.entrypoints=websecure
+      - traefik.http.routers.${SERVICE}-http.tls=true
+      - traefik.http.routers.${SERVICE}-http.middlewares=${SERVICE}-strip
+      - traefik.http.routers.${SERVICE}-http.service=${SERVICE}-http
+      - traefik.http.services.${SERVICE}-http.loadbalancer.server.port=8082
+      # Middlewares 
+      - traefik.http.middlewares.${SERVICE}-strip.stripprefix.prefixes=/seafhttp
+      - traefik.http.middlewares.sec-headers.headers.framedeny=true
+      - traefik.http.middlewares.sec-headers.headers.sslredirect=true
+      - traefik.http.middlewares.sec-headers.headers.browserXssFilter=true
+      - traefik.http.middlewares.sec-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.sec-headers.headers.forceSTSHeader=true
+      - traefik.http.middlewares.sec-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.sec-headers.headers.stsPreload=true
+      - traefik.http.middlewares.sec-headers.headers.referrerPolicy=same-origin
+      # Network
+      - "traefik.docker.network=traefik_default"
+    expose:
+      - 8000
+      - 8082
+      - 8080
+    depends_on:
+      - db
+      - memcached
+    networks:
+      - traefik_default
+      - internal
+
+networks:
+  internal:
+    internal: true
+  traefik_default:
+    external: true
+
